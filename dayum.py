@@ -14,8 +14,8 @@ import sys, json, time, argparse, tempfile
 from pathlib import Path
 from datetime import datetime
 
-GROQ_API_KEY   = "USE YOUR OWN KEY PLS"
-GEMINI_API_KEY = "USE YOUR OWN KEY PLS"
+GROQ_API_KEY   = "USE YOUR OWN API KEY PLS"
+GEMINI_API_KEY = "USE YOUR OWN API KEY PLS"
 
 
 WHISPER_MODEL = "whisper-large-v3"
@@ -23,9 +23,116 @@ LLM_MODEL     = "gemini-3.1-flash-lite"
 MAX_CHUNK_MB  = 24
 CHUNK_MS      = 10 * 60 * 1000   
 
+
+GROQ_WHISPER_USD_PER_HOUR = 0.111
+
+
+GEMINI_INPUT_USD_PER_TOKEN  = 0.10  / 1_000_000
+GEMINI_OUTPUT_USD_PER_TOKEN = 0.40  / 1_000_000
+
+
+CHARS_PER_TOKEN = 4
+
+USD_TO_INR = 96.17
+
+
+
+class CostTracker:
+    """Accumulates API usage and converts totals to INR."""
+
+    def __init__(self, usd_to_inr: float = USD_TO_INR):
+        self.usd_to_inr          = usd_to_inr
+        self.audio_seconds       = 0.0   # seconds of audio sent to Whisper
+        self.gemini_input_chars  = 0     # prompt chars sent to Gemini
+        self.gemini_output_chars = 0     # response chars received from Gemini
+        self._gemini_calls       = 0
+
+    
+    def add_audio(self, duration_seconds: float):
+        self.audio_seconds += duration_seconds
+
+    def add_gemini_call(self, prompt: str, response: str):
+        self._gemini_calls      += 1
+        self.gemini_input_chars  += len(prompt)
+        self.gemini_output_chars += len(response)
+
+    # ── cost calculations ──────────────────────────────────────────────────────
+    @property
+    def whisper_usd(self) -> float:
+        return (self.audio_seconds / 3600) * GROQ_WHISPER_USD_PER_HOUR
+
+    @property
+    def gemini_input_usd(self) -> float:
+        tokens = self.gemini_input_chars / CHARS_PER_TOKEN
+        return tokens * GEMINI_INPUT_USD_PER_TOKEN
+
+    @property
+    def gemini_output_usd(self) -> float:
+        tokens = self.gemini_output_chars / CHARS_PER_TOKEN
+        return tokens * GEMINI_OUTPUT_USD_PER_TOKEN
+
+    @property
+    def total_usd(self) -> float:
+        return self.whisper_usd + self.gemini_input_usd + self.gemini_output_usd
+
+    @property
+    def total_inr(self) -> float:
+        return self.total_usd * self.usd_to_inr
+
+    # ── display ────────────────────────────────────────────────────────────────
+    def summary(self) -> str:
+        rate = self.usd_to_inr
+        mins, secs = divmod(int(self.audio_seconds), 60)
+        lines = [
+            "",
+            "=" * 72,
+            " COST BREAKDOWN  (prices as of May 2025)",
+            "=" * 72,
+            f"  Exchange rate used          : $1 USD = ₹{rate:.2f}",
+            "",
+            f"  ┌─ Groq Whisper Large v3 ({'transcription'})",
+            f"  │   Audio processed         : {mins}m {secs}s  ({self.audio_seconds:.1f}s)",
+            f"  │   Rate                    : ${GROQ_WHISPER_USD_PER_HOUR}/hr",
+            f"  │   Cost                    : ${self.whisper_usd:.6f}  (₹{self.whisper_usd * rate:.4f})",
+            "",
+            f"  ├─ Gemini Flash-Lite  ({self._gemini_calls} call(s))",
+            f"  │   Input  chars / ~tokens  : {self.gemini_input_chars:,} / ~{self.gemini_input_chars // CHARS_PER_TOKEN:,}",
+            f"  │   Output chars / ~tokens  : {self.gemini_output_chars:,} / ~{self.gemini_output_chars // CHARS_PER_TOKEN:,}",
+            f"  │   Input  rate             : ${GEMINI_INPUT_USD_PER_TOKEN * 1_000_000:.2f}/M tokens",
+            f"  │   Output rate             : ${GEMINI_OUTPUT_USD_PER_TOKEN * 1_000_000:.2f}/M tokens",
+            f"  │   Input  cost             : ${self.gemini_input_usd:.6f}  (₹{self.gemini_input_usd * rate:.4f})",
+            f"  │   Output cost             : ${self.gemini_output_usd:.6f}  (₹{self.gemini_output_usd * rate:.4f})",
+            f"  │   Gemini subtotal         : ${self.gemini_input_usd + self.gemini_output_usd:.6f}  (₹{(self.gemini_input_usd + self.gemini_output_usd) * rate:.4f})",
+            "",
+            f"  └─ TOTAL                    : ${self.total_usd:.6f}  ≈  ₹{self.total_inr:.4f}",
+            "=" * 72,
+            "  Note: Token counts are estimated (~4 chars/token). Actual billing",
+            "  may differ slightly. Update USD_TO_INR constant for current rate.",
+            "=" * 72,
+        ]
+        return "\n".join(lines)
+
+
+
+def fetch_usd_inr() -> float:
+    """Fetch live mid-market USD/INR from exchangerate-api (no key needed)."""
+    try:
+        import urllib.request, json as _json
+        url = "https://open.er-api.com/v6/latest/USD"
+        with urllib.request.urlopen(url, timeout=5) as r:
+            data = _json.loads(r.read())
+        rate = data["rates"]["INR"]
+        print(f"[i] Live USD/INR fetched: ₹{rate:.2f}")
+        return rate
+    except Exception as e:
+        print(f"[!] Could not fetch live rate ({e}). Using default ₹{USD_TO_INR:.2f}")
+        return USD_TO_INR
+
+
 import groq as groq_sdk
 from google import genai
 from pydub import AudioSegment
+
 
 def load_audio(path: Path) -> AudioSegment:
     audio = AudioSegment.from_file(str(path))
@@ -54,13 +161,17 @@ def split_if_needed(audio: AudioSegment, base_tmp: Path):
         start = i * CHUNK_MS
         yield audio[start:min(start + CHUNK_MS, total_ms)], start
 
-
-def transcribe_audio(client, audio: AudioSegment, tmp_dir: Path) -> dict:
+def transcribe_audio(client, audio: AudioSegment, tmp_dir: Path, cost: CostTracker) -> dict:
     print("\n[1/3] Transcribing...")
     all_segments, full_texts = [], []
     for idx, (chunk, offset_ms) in enumerate(split_if_needed(audio, tmp_dir / "chunk.mp3")):
         chunk_path = tmp_dir / f"chunk_{idx}.mp3"
         export_chunk(chunk, chunk_path)
+
+        # Track audio duration before sending
+        chunk_duration_s = len(chunk) / 1000
+        cost.add_audio(chunk_duration_s)
+
         with open(chunk_path, "rb") as f:
             response = client.audio.transcriptions.create(
                 file=(chunk_path.name, f, "audio/mpeg"),
@@ -82,15 +193,16 @@ def transcribe_audio(client, audio: AudioSegment, tmp_dir: Path) -> dict:
     print(f"Transcription done — {len(all_segments)} segments.")
     return {"full_text": " ".join(full_texts), "segments": all_segments}
 
-
-def call_llm(gemini_client, prompt: str, retries=3) -> str:
+def call_llm(gemini_client, prompt: str, cost: CostTracker, retries=3) -> str:
     for attempt in range(retries):
         try:
             response = gemini_client.models.generate_content(
                 model=LLM_MODEL,
                 contents=prompt,
             )
-            return response.text.strip()
+            result = response.text.strip()
+            cost.add_gemini_call(prompt, result)   # ← record usage
+            return result
         except Exception as e:
             if attempt < retries - 1:
                 wait = 2 ** attempt
@@ -98,7 +210,6 @@ def call_llm(gemini_client, prompt: str, retries=3) -> str:
                 time.sleep(wait)
             else:
                 raise
-
 
 DIARIZE_PROMPT = """\
 You are an expert call-center transcript analyst for Hexbis Innovations.
@@ -122,7 +233,7 @@ def format_ts(seconds: float) -> str:
     mins, secs = divmod(int(seconds), 60)
     return f"{mins:02d}:{secs:02d}"
 
-def diarize(client, segments: list) -> str:
+def diarize(client, segments: list, cost: CostTracker) -> str:
     print("[2/3] Diarizing...")
 
     CHUNK_SIZE = 30
@@ -134,10 +245,11 @@ def diarize(client, segments: list) -> str:
         print(f"  Chunk {i+1}/{len(chunks)}...")
         result = call_llm(client, DIARIZE_PROMPT.format(
             segments_json=json.dumps(chunk, indent=2, ensure_ascii=False)
-        ))
+        ), cost)
         all_lines.append(result.strip())
         if i < len(chunks) - 1:
-            time.sleep(1)   
+            time.sleep(1)
+
     print("Diarization done.")
     return "\n".join(all_lines)
 
@@ -158,13 +270,12 @@ DIARIZED TRANSCRIPT:
 {diarized_text}
 """
 
-def summarize(client, diarized_text: str) -> str:
+def summarize(client, diarized_text: str, cost: CostTracker) -> str:
     print("[3/3] Summarizing and extracting flags...")
-    
     truncated = diarized_text[:8000]
     if len(diarized_text) > 8000:
         truncated += "\n\n[Transcript truncated for summary]"
-    return call_llm(client, SUMMARY_PROMPT.format(diarized_text=truncated))
+    return call_llm(client, SUMMARY_PROMPT.format(diarized_text=truncated), cost)
 
 
 FLAGS_PROMPT = """\
@@ -199,13 +310,14 @@ DIARIZED TRANSCRIPT:
 {diarized_text}
 """
 
-def extract_flags(client, diarized_text: str) -> str:
+def extract_flags(client, diarized_text: str, cost: CostTracker) -> str:
     truncated = diarized_text[:8000]
     if len(diarized_text) > 8000:
         truncated += "\n\n[Transcript truncated for analysis]"
-    return call_llm(client, FLAGS_PROMPT.format(diarized_text=truncated))
+    return call_llm(client, FLAGS_PROMPT.format(diarized_text=truncated), cost)
 
-def save_report(output_dir: Path, audio_name: str, diarized: str, summary: str, flags: str) -> Path:
+def save_report(output_dir: Path, audio_name: str, diarized: str, summary: str,
+                flags: str, cost_summary: str) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     stem = Path(audio_name).stem.replace(" ", "_")
     ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -217,22 +329,26 @@ def save_report(output_dir: Path, audio_name: str, diarized: str, summary: str, 
         f"{'='*72}\n\n"
         f"{'='*72}\n SECTION 1 — DIARIZED TRANSCRIPT\n{'='*72}\n\n{diarized}\n\n"
         f"{'='*72}\n SECTION 2 — CALL SUMMARY\n{'='*72}\n\n{summary}\n\n"
-        f"{'='*72}\n SECTION 3 — FEEDBACK FLAGS & RECOMMENDATIONS\n{'='*72}\n\n{flags}\n",
+        f"{'='*72}\n SECTION 3 — FEEDBACK FLAGS & RECOMMENDATIONS\n{'='*72}\n\n{flags}\n\n"
+        f"{'='*72}\n SECTION 4 — COST BREAKDOWN\n{'='*72}\n\n{cost_summary}\n",
         encoding="utf-8",
     )
     return out_file
 
-def analyze(audio_path: Path, groq_client, gemini_client, output_dir: Path):
+def analyze(audio_path: Path, groq_client, gemini_client, output_dir: Path,
+            usd_to_inr: float):
     print(f"\nAnalyzing: {audio_path.name}")
     print("-" * 50)
+
+    cost = CostTracker(usd_to_inr=usd_to_inr)
 
     with tempfile.TemporaryDirectory(prefix="trackhr_") as tmp:
         tmp_dir = Path(tmp)
         audio         = load_audio(audio_path)
-        transcription = transcribe_audio(groq_client, audio, tmp_dir)
-        diarized      = diarize(gemini_client, transcription["segments"])
-        summary       = summarize(gemini_client, diarized)
-        flags         = extract_flags(gemini_client, diarized)
+        transcription = transcribe_audio(groq_client, audio, tmp_dir, cost)
+        diarized      = diarize(gemini_client, transcription["segments"], cost)
+        summary       = summarize(gemini_client, diarized, cost)
+        flags         = extract_flags(gemini_client, diarized, cost)
 
     sep = "=" * 72
 
@@ -251,22 +367,33 @@ def analyze(audio_path: Path, groq_client, gemini_client, output_dir: Path):
     print(sep)
     print(flags)
 
-    out_file = save_report(output_dir, audio_path.name, diarized, summary, flags)
+    cost_summary = cost.summary()
+    print(f"\n{sep}")
+    print(" SECTION 4 — COST BREAKDOWN")
+    print(cost_summary)
+
+    out_file = save_report(output_dir, audio_path.name, diarized, summary, flags, cost_summary)
     print(f"\nReport saved: {out_file}")
     print("-" * 50)
-
 
 def main():
     parser = argparse.ArgumentParser(description="TrackHR Call Analyzer — Hexbis Innovations")
     parser.add_argument("audio", nargs="?", help="Path to MP3 file")
-    parser.add_argument("--batch",  metavar="FOLDER", help="Process all MP3s in a folder")
-    parser.add_argument("--output", metavar="DIR", default="./trackhr_reports",
+    parser.add_argument("--batch",     metavar="FOLDER", help="Process all MP3s in a folder")
+    parser.add_argument("--output",    metavar="DIR", default="./trackhr_reports",
                         help="Output directory (default: ./trackhr_reports)")
+    parser.add_argument("--live-rate", action="store_true",
+                        help="Fetch live USD/INR exchange rate before running")
     args = parser.parse_args()
 
     groq_client   = groq_sdk.Groq(api_key=GROQ_API_KEY)
     gemini_client = genai.Client(api_key=GEMINI_API_KEY)
     output_dir    = Path(args.output)
+
+    usd_to_inr = fetch_usd_inr() if args.live_rate else USD_TO_INR
+    if not args.live_rate:
+        print(f"[i] Using hardcoded USD/INR rate: ₹{usd_to_inr:.2f}  "
+              f"(pass --live-rate to fetch current rate)")
 
     if args.batch:
         folder = Path(args.batch)
@@ -279,7 +406,7 @@ def main():
             sys.exit(1)
         for mp3 in mp3_files:
             try:
-                analyze(mp3, groq_client, gemini_client, output_dir)
+                analyze(mp3, groq_client, gemini_client, output_dir, usd_to_inr)
             except Exception as e:
                 print(f"[!] Error processing {mp3.name}: {e}")
         return
@@ -297,7 +424,7 @@ def main():
         print(f"[!] Only MP3 files are supported. Got: {audio_path.suffix}")
         sys.exit(1)
 
-    analyze(audio_path, groq_client, gemini_client, output_dir)
+    analyze(audio_path, groq_client, gemini_client, output_dir, usd_to_inr)
 
 
 if __name__ == "__main__":
