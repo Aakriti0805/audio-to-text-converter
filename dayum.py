@@ -14,8 +14,8 @@ import sys, json, time, argparse, tempfile
 from pathlib import Path
 from datetime import datetime
 
-GROQ_API_KEY   = "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"
-GEMINI_API_KEY = "AIzaSyBae1iWeM1jvWSZDDZ31mB4yoQOmnbZZK0"
+GROQ_API_KEY   = "USE YOUR OWN KEY PLS"
+GEMINI_API_KEY = "USE YOUR OWN KEY PLS"
 
 
 WHISPER_MODEL = "whisper-large-v3"
