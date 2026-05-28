@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 TrackHR Call Analyzer — Hexbis Innovations
 Uses: Groq Whisper-Large-v3 (transcription) + Gemini 3.1 Flash Lite (diarization, summary, flags)
@@ -42,9 +41,9 @@ class CostTracker:
 
     def __init__(self, usd_to_inr: float = USD_TO_INR):
         self.usd_to_inr          = usd_to_inr
-        self.audio_seconds       = 0.0   # seconds of audio sent to Whisper
-        self.gemini_input_chars  = 0     # prompt chars sent to Gemini
-        self.gemini_output_chars = 0     # response chars received from Gemini
+        self.audio_seconds       = 0.0   
+        self.gemini_input_chars  = 0     
+        self.gemini_output_chars = 0     
         self._gemini_calls       = 0
 
     
@@ -56,7 +55,7 @@ class CostTracker:
         self.gemini_input_chars  += len(prompt)
         self.gemini_output_chars += len(response)
 
-    # ── cost calculations ──────────────────────────────────────────────────────
+    
     @property
     def whisper_usd(self) -> float:
         return (self.audio_seconds / 3600) * GROQ_WHISPER_USD_PER_HOUR
@@ -79,7 +78,7 @@ class CostTracker:
     def total_inr(self) -> float:
         return self.total_usd * self.usd_to_inr
 
-    # ── display ────────────────────────────────────────────────────────────────
+
     def summary(self) -> str:
         rate = self.usd_to_inr
         mins, secs = divmod(int(self.audio_seconds), 60)
@@ -168,7 +167,7 @@ def transcribe_audio(client, audio: AudioSegment, tmp_dir: Path, cost: CostTrack
         chunk_path = tmp_dir / f"chunk_{idx}.mp3"
         export_chunk(chunk, chunk_path)
 
-        # Track audio duration before sending
+        
         chunk_duration_s = len(chunk) / 1000
         cost.add_audio(chunk_duration_s)
 
@@ -201,7 +200,7 @@ def call_llm(gemini_client, prompt: str, cost: CostTracker, retries=3) -> str:
                 contents=prompt,
             )
             result = response.text.strip()
-            cost.add_gemini_call(prompt, result)   # ← record usage
+            cost.add_gemini_call(prompt, result)   
             return result
         except Exception as e:
             if attempt < retries - 1:
