@@ -33,6 +33,8 @@ The model then performs a structured CX (Customer Experience) analysis and extra
 |---|---|
 | Speech-to-Text | Groq — Whisper Large v3 |
 | AI Analysis | Groq — LLaMA 3.3 70B Versatile |
+|                  AND               |
+| AI Analysis |Google AI Studio - Gemini 3.1 Flash-Lite |
 | Audio Processing | pydub + ffmpeg |
 | Language | Python 3.11+ |
 | Interface | Terminal (CLI) |
@@ -82,4 +84,4 @@ python trackhr_analyzer.py call.mp3 --output ./my_reports
 
 ---
 
-*Built for Hexbis Innovations · TrackHR Customer Support Pipeline · 2025*
+*Built for Hexbis Innovations · TrackHR Customer Support Pipeline · 2026*
